@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <dirent.h>
 #define BLOCK 1024
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 #define strerr strerror(errno)
@@ -34,9 +35,12 @@ struct stat *lstat_(const char *name) {
 	free(s);
 	return NULL;
 }
-int copy(char *src, char *dest, bool verbose, bool recurse) {
+int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
+	printf("Copying %s to %s...\n", src, dest);
 	struct stat *stat = lstat_(src);
 	struct stat *dstat = lstat_(src);
+	struct dirent *dir;
+	DIR *d;
 	int res = 0;
 	if (!stat) {
 		eprintf("lstat: %s: %s\n", src, strerr);
@@ -60,7 +64,43 @@ int copy(char *src, char *dest, bool verbose, bool recurse) {
 			}
 		}
 		if (recurse) {
+			d = opendir(src);
+			if (!d) {
+				eprintf("opendir: %s: %s\n", src, strerr);
+				free(stat); if (dstat) free(dstat);
+				return 1;
+			}
 			if (verbose) printf("Recursing into directory: %s\n", dest);
+			for (;;) {
+				errno = 0;
+				dir = readdir(d);
+				if (errno) {
+					eprintf("readdir: %s: %s\n", src, strerr);
+					free(stat); if (dstat) free(dstat);
+					return 1;
+				}
+				if (!dir) break;
+				if (dir->d_name[0] == '.' && (dir->d_name[1] == '\0' || (dir->d_name[1] == '.' && dir->d_name[2] == '\0'))) continue;
+				char *nsrcf  = malloc(strlen(src) +strlen(dir->d_name)+8);
+				char *ndestf = malloc(strlen(dest)+strlen(dir->d_name)+8);
+				sprintf(nsrcf,  "%s/%s", src,  dir->d_name);
+				sprintf(ndestf, "%s/%s", dest, dir->d_name);
+				if (fork_recurse) {
+					pid_t f = fork();
+					if (f < 0) {
+						eprintf("fork: %s\n", strerr);
+						free(stat); if (dstat) free(dstat);
+						return 1;
+					} else if (f == 0) {
+						printf("new fork: %i\n", getpid());
+						copy(nsrcf, ndestf, verbose, recurse, 1);
+						exit(0);
+						return 0;
+					}
+				} else {
+					copy(nsrcf, ndestf, verbose, recurse, 0);
+				}
+			}
 		}
 	} else if (stat->st_mode & S_IFIFO) {
 		if (verbose) printf("Creating FIFO: %s\n", dest);
@@ -110,14 +150,18 @@ int copy(char *src, char *dest, bool verbose, bool recurse) {
 }
 int usage(char *argv0) {
 	eprintf("\
-Usage: %s [src] [dest]\n", argv0);
+Usage: %s [src] [dest]\n\
+	-v --verbose   : extra information\n\
+	-r --recursive : recurse down directories\n\
+	-f --fork      : fork() when recursing", argv0);
 	return 2;
 }
 int main(int argc, char *argv[]) {
 #define INVALID return usage(argv[0])
 	bool flag_done = 0;
 	bool verbose = 0;
-	bool recurse = 0;
+	bool recursive = 0;
+	bool fork_recursive = 0;
 	char *src = NULL;
 	char *dest = NULL;
 	for (int i = 1; i < argc; ++i) {
@@ -127,9 +171,13 @@ int main(int argc, char *argv[]) {
 				if (verbose) INVALID;
 				verbose = 1;
 			} else
-			if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--recurse") == 0) {
-				if (recurse) INVALID;
-				recurse = 1;
+			if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--recursive") == 0) {
+				if (recursive) INVALID;
+				recursive = 1;
+			} else
+			if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--fork") == 0) {
+				if (fork_recursive) INVALID;
+				fork_recursive = 1;
 			} else
 			INVALID;
 		} else {
@@ -144,6 +192,7 @@ int main(int argc, char *argv[]) {
 			}
 		}
 	}
+	if (fork_recursive && !recursive) INVALID;
 	if (!src || !dest) INVALID;
 	bool a = 0;
 	for (size_t i = 0;; ++i) {
@@ -169,6 +218,6 @@ int main(int argc, char *argv[]) {
 			dest[i] = '/';
 		}
 	}
-	int r = copy(src, dest, verbose, recurse);
+	int r = copy(src, dest, verbose, recursive, fork_recursive);
 	return r;
 }
