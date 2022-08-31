@@ -13,6 +13,10 @@
 #define strerr strerror(errno)
 int copydata(FILE *src, FILE *dest, size_t block) {
 	uint8_t* data = malloc(block);
+	if (!data) {
+		eprintf("malloc: %s\n", strerr);
+		return 1;
+	}
 	size_t len;
 	while (1) {
 		if (feof(src)) break;
@@ -29,21 +33,26 @@ int copydata(FILE *src, FILE *dest, size_t block) {
 	}
 	return 0;
 }
-struct stat *lstat_(const char *name) {
+struct stat *lstat_(const char *name, bool err) {
 	struct stat *s = malloc(sizeof(struct stat));
+	if (!name) {
+		eprintf("malloc: %s\n", strerr);
+		return NULL;
+	}
 	if (lstat(name, s) == 0) return s;
 	free(s);
+	if (err) eprintf("lstat: %s: %s\n", name, strerr);
 	return NULL;
 }
 int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 	printf("Copying %s to %s...\n", src, dest);
-	struct stat *stat = lstat_(src);
-	struct stat *dstat = lstat_(src);
+	struct stat *stat = lstat_(src, 1);
+	struct stat *dstat = lstat_(dest, 0);
 	struct dirent *dir;
 	DIR *d;
 	int res = 0;
 	if (!stat) {
-		eprintf("lstat: %s: %s\n", src, strerr);
+		if (dstat) free(dstat);
 		return 1;
 	}
 	if (dstat && !(dstat->st_mode & S_IFDIR) && !((stat->st_mode & S_IFREG) && (stat->st_mode & S_IFREG))) {
@@ -53,6 +62,11 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 			free(dstat);
 			return 1;
 		}
+	}
+	if (dstat && (dstat->st_mode & S_IFDIR) && !(stat->st_mode & S_IFDIR)) {
+		eprintf("Destination %s is directory\n", dest);
+		free(dstat);
+		return 1;
 	}
 	if (stat->st_mode & S_IFDIR) {
 		if (!(dstat && (dstat->st_mode & S_IFDIR))) {
@@ -82,7 +96,18 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 				if (!dir) break;
 				if (dir->d_name[0] == '.' && (dir->d_name[1] == '\0' || (dir->d_name[1] == '.' && dir->d_name[2] == '\0'))) continue;
 				char *nsrcf  = malloc(strlen(src) +strlen(dir->d_name)+8);
+				if (!nsrcf) {
+					eprintf("malloc: %s\n", strerr);
+					free(stat); if (dstat) free(dstat);
+					return 1;
+				}
 				char *ndestf = malloc(strlen(dest)+strlen(dir->d_name)+8);
+				if (!ndestf) {
+					free(nsrcf);
+					eprintf("malloc: %s\n", strerr);
+					free(stat); if (dstat) free(dstat);
+					return 1;
+				}
 				sprintf(nsrcf,  "%s/%s", src,  dir->d_name);
 				sprintf(ndestf, "%s/%s", dest, dir->d_name);
 				if (fork_recurse) {
@@ -109,6 +134,33 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
+	} else if (stat->st_mode & S_IFLNK) {
+		if (verbose) printf("Creating symlink: %s\n", dest);
+		char *symdata = malloc(PATH_MAX);
+		if (!symdata) {
+			eprintf("malloc: %s\n", strerr);
+			free(stat); if (dstat) free(dstat);
+			return 1;
+		}
+		ssize_t len = readlink(src, symdata, PATH_MAX-1);
+		if (len < 0 || len >= PATH_MAX-2) {
+			if (len < 0) {
+				eprintf("readlink: %s: %s\n", src, strerr);
+			} else {
+				eprintf("data of symlink %s is too big\n", src);
+			}
+			free(symdata); free(stat); if (dstat) free(dstat);
+			return 1;
+		}
+		symdata[len] = 0;
+		if (symlink(symdata, dest) != 0) {
+			eprintf("symlink: %s: %s\n", dest, strerr);
+			free(symdata); free(stat); if (dstat) free(dstat);
+			return 1;
+		}
+		free(symdata);
+	} else if (stat->st_mode & S_IFSOCK) {
+		eprintf("Don't know how to copy socket %s to %s\n", src, dest);
 	} else if (stat->st_mode & (S_IFCHR | S_IFBLK)) {
 		if (verbose) printf("Creating %sdevice: %s\n", stat->st_mode & S_IFBLK ? "block " : stat->st_mode & S_IFCHR ? "character " : "", dest);
 		if (mknod(dest, stat->st_mode, stat->st_dev) != 0) {
@@ -133,10 +185,6 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 		res = copydata(f_src, f_dest, BLOCK);
 		fclose(f_src);
 		fclose(f_dest);
-	} else if (stat->st_mode & S_IFLNK) {
-
-	} else if (stat->st_mode & S_IFSOCK) {
-
 	}
 	/*
 	if (fchmod(fileno(f_dest), stat->st_mode) != 0) {
@@ -153,7 +201,7 @@ int usage(char *argv0) {
 Usage: %s [src] [dest]\n\
 	-v --verbose   : extra information\n\
 	-r --recursive : recurse down directories\n\
-	-f --fork      : fork() when recursing", argv0);
+	-f --fork      : fork() when recursing\n", argv0);
 	return 2;
 }
 int main(int argc, char *argv[]) {
@@ -193,31 +241,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 	if (fork_recursive && !recursive) INVALID;
-	if (!src || !dest) INVALID;
-	bool a = 0;
-	for (size_t i = 0;; ++i) {
-		if (dest[i] == '\0') a = 1;
-		if (dest[i] == '\0' || dest[i] == '/') {
-			dest[i] = '\0';
-			struct stat *stat = lstat_(dest);
-			if (!stat) {
-				if (verbose) printf("Creating output directory: %s\n", dest);
-				if (mkdir(dest, 0755) != 0) {
-					eprintf("mkdir: %s: %s\n", dest, strerr);
-					free(stat);
-					return 1;
-				}
-			} else {
-				if (!(stat->st_mode & S_IFDIR)) {
-					eprintf("Output already exists: %s\n", dest);
-					free(stat);
-					return 1;
-				}
-			}
-			if (a) break;
-			dest[i] = '/';
-		}
-	}
+	if (!src || !dest || !src[0] || !dest[0]) INVALID;
 	int r = copy(src, dest, verbose, recursive, fork_recursive);
 	return r;
 }
