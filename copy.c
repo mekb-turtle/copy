@@ -49,13 +49,15 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 	struct stat *stat = lstat_(src, 1);
 	struct stat *dstat = lstat_(dest, 0);
 	struct dirent *dir;
+	mode_t filetype  =  stat->st_mode & S_IFMT;
+	mode_t dfiletype = dstat->st_mode & S_IFMT;
 	DIR *d;
 	int res = 0;
 	if (!stat) {
 		if (dstat) free(dstat);
 		return 1;
 	}
-	if (dstat && !(dstat->st_mode & S_IFDIR) && !((stat->st_mode & S_IFREG) && (stat->st_mode & S_IFREG))) {
+	if (dstat && dfiletype != S_IFDIR && !(filetype == S_IFREG && filetype == S_IFREG)) {
 		if (verbose) printf("Removing already existing file: %s\n", dest);
 		if (unlink(dest) != 0) {
 			eprintf("unlink: %s: %s\n", dest, strerr);
@@ -63,13 +65,13 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 			return 1;
 		}
 	}
-	if (dstat && (dstat->st_mode & S_IFDIR) && !(stat->st_mode & S_IFDIR)) {
+	if (dstat && dfiletype == S_IFDIR && filetype != S_IFDIR) {
 		eprintf("Destination %s is directory\n", dest);
 		free(dstat);
 		return 1;
 	}
-	if (stat->st_mode & S_IFDIR) {
-		if (!(dstat && (dstat->st_mode & S_IFDIR))) {
+	if (filetype == S_IFDIR) {
+		if (!(dstat && dfiletype == S_IFDIR)) {
 			if (verbose) printf("Creating directory: %s\n", dest);
 			if (mkdir(dest, stat->st_mode) != 0) {
 				eprintf("mkdir: %s: %s\n", dest, strerr);
@@ -127,14 +129,14 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 				}
 			}
 		}
-	} else if (stat->st_mode & S_IFIFO) {
+	} else if (filetype == S_IFIFO) {
 		if (verbose) printf("Creating FIFO: %s\n", dest);
 		if (mkfifo(dest, stat->st_mode) != 0) {
 			eprintf("mkfifo: %s: %s\n", dest, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
-	} else if (stat->st_mode & S_IFLNK) {
+	} else if (filetype == S_IFLNK) {
 		if (verbose) printf("Creating symlink: %s\n", dest);
 		char *symdata = malloc(PATH_MAX);
 		if (!symdata) {
@@ -159,16 +161,16 @@ int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
 			return 1;
 		}
 		free(symdata);
-	} else if (stat->st_mode & S_IFSOCK) {
+	} else if (filetype == S_IFSOCK) {
 		eprintf("Don't know how to copy socket %s to %s\n", src, dest);
-	} else if (stat->st_mode & (S_IFCHR | S_IFBLK)) {
-		if (verbose) printf("Creating %sdevice: %s\n", stat->st_mode & S_IFBLK ? "block " : stat->st_mode & S_IFCHR ? "character " : "", dest);
+	} else if (filetype == S_IFCHR || filetype == S_IFBLK) {
+		if (verbose) printf("Creating %sdevice: %s\n", filetype == S_IFBLK ? "block " : filetype == S_IFCHR ? "character " : "", dest);
 		if (mknod(dest, stat->st_mode, stat->st_dev) != 0) {
 			eprintf("mknod: %s: %s\n", dest, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
-	} else if (stat->st_mode & S_IFREG) {
+	} else if (filetype == S_IFREG) {
 		FILE *f_src = fopen(src, "rb");
 		if (!f_src) {
 			eprintf("fopen: %s: %s\n", src, strerr);
