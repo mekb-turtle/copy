@@ -11,7 +11,7 @@
 #define BLOCK 1024
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 #define strerr strerror(errno)
-int copydata(FILE *src, FILE *dest, size_t block) {
+uint8_t copyfiledata(FILE *src, FILE *dest, size_t block) {
 	uint8_t* data = malloc(block);
 	if (!data) {
 		eprintf("malloc: %s\n", strerr);
@@ -44,153 +44,147 @@ struct stat *lstat_(const char *name, bool err) {
 	if (err) eprintf("lstat: %s: %s\n", name, strerr);
 	return NULL;
 }
-int copy(char *src, char *dest, bool verbose, bool recurse, bool fork_recurse) {
-	printf("Copying %s to %s...\n", src, dest);
-	struct stat *stat = lstat_(src, 1);
-	struct stat *dstat = lstat_(dest, 0);
+struct copydata {
+	char *src;
+	char *dest;
+	bool verbose, recurse;
+};
+uint8_t copy(struct copydata *copydata) {
+	printf("Copying %s to %s...\n", copydata->src, copydata->dest);
+	struct stat *stat = lstat_(copydata->src, 1);
+	struct stat *dstat = lstat_(copydata->dest, 0);
 	struct dirent *dir;
-	mode_t filetype  =  stat->st_mode & S_IFMT;
-	mode_t dfiletype = dstat->st_mode & S_IFMT;
+	mode_t filetype = stat->st_mode & S_IFMT;
 	DIR *d;
 	int res = 0;
 	if (!stat) {
 		if (dstat) free(dstat);
 		return 1;
 	}
-	if (dstat && dfiletype != S_IFDIR && !(filetype == S_IFREG && filetype == S_IFREG)) {
-		if (verbose) printf("Removing already existing file: %s\n", dest);
-		if (unlink(dest) != 0) {
-			eprintf("unlink: %s: %s\n", dest, strerr);
+	if (dstat) {
+		mode_t dfiletype = dstat->st_mode & S_IFMT;
+		if (dfiletype != S_IFDIR && !(filetype == S_IFREG && filetype == S_IFREG)) {
+			if (copydata->verbose) printf("Removing already existing file: %s\n", copydata->dest);
+			if (unlink(copydata->dest) != 0) {
+				eprintf("unlink: %s: %s\n", copydata->dest, strerr);
+				free(dstat);
+				return 1;
+			}
+		}
+		if (dfiletype == S_IFDIR && filetype != S_IFDIR) {
+			eprintf("Destination %s is directory\n", copydata->dest);
 			free(dstat);
 			return 1;
 		}
 	}
-	if (dstat && dfiletype == S_IFDIR && filetype != S_IFDIR) {
-		eprintf("Destination %s is directory\n", dest);
-		free(dstat);
-		return 1;
-	}
 	if (filetype == S_IFDIR) {
-		if (!(dstat && dfiletype == S_IFDIR)) {
-			if (verbose) printf("Creating directory: %s\n", dest);
-			if (mkdir(dest, stat->st_mode) != 0) {
-				eprintf("mkdir: %s: %s\n", dest, strerr);
+		if (!(dstat && (dstat->st_mode & S_IFMT) == S_IFDIR)) {
+			if (copydata->verbose) printf("Creating directory: %s\n", copydata->dest);
+			if (mkdir(copydata->dest, stat->st_mode) != 0) {
+				eprintf("mkdir: %s: %s\n", copydata->dest, strerr);
 				free(stat); if (dstat) free(dstat);
 				return 1;
 			}
 		}
-		if (recurse) {
-			d = opendir(src);
+		if (copydata->recurse) {
+			d = opendir(copydata->src);
 			if (!d) {
-				eprintf("opendir: %s: %s\n", src, strerr);
+				eprintf("opendir: %s: %s\n", copydata->src, strerr);
 				free(stat); if (dstat) free(dstat);
 				return 1;
 			}
-			if (verbose) printf("Recursing into directory: %s\n", dest);
+			if (copydata->verbose) printf("Recursing into directory: %s\n", copydata->dest);
 			for (;;) {
 				errno = 0;
 				dir = readdir(d);
 				if (errno) {
-					eprintf("readdir: %s: %s\n", src, strerr);
+					eprintf("readdir: %s: %s\n", copydata->src, strerr);
 					free(stat); if (dstat) free(dstat);
 					return 1;
 				}
 				if (!dir) break;
 				if (dir->d_name[0] == '.' && (dir->d_name[1] == '\0' || (dir->d_name[1] == '.' && dir->d_name[2] == '\0'))) continue;
-				char *nsrcf  = malloc(strlen(src) +strlen(dir->d_name)+8);
+				char *nsrcf  = malloc(strlen(copydata->src) +strlen(dir->d_name)+8);
 				if (!nsrcf) {
 					eprintf("malloc: %s\n", strerr);
 					free(stat); if (dstat) free(dstat);
 					return 1;
 				}
-				char *ndestf = malloc(strlen(dest)+strlen(dir->d_name)+8);
+				char *ndestf = malloc(strlen(copydata->dest)+strlen(dir->d_name)+8);
 				if (!ndestf) {
 					free(nsrcf);
 					eprintf("malloc: %s\n", strerr);
 					free(stat); if (dstat) free(dstat);
 					return 1;
 				}
-				sprintf(nsrcf,  "%s/%s", src,  dir->d_name);
-				sprintf(ndestf, "%s/%s", dest, dir->d_name);
-				if (fork_recurse) {
-					pid_t f = fork();
-					if (f < 0) {
-						eprintf("fork: %s\n", strerr);
-						free(stat); if (dstat) free(dstat);
-						return 1;
-					} else if (f == 0) {
-						printf("new fork: %i\n", getpid());
-						copy(nsrcf, ndestf, verbose, recurse, 1);
-						exit(0);
-						return 0;
-					}
-				} else {
-					copy(nsrcf, ndestf, verbose, recurse, 0);
-				}
+				sprintf(nsrcf,  "%s/%s", copydata->src,  dir->d_name);
+				sprintf(ndestf, "%s/%s", copydata->dest, dir->d_name);
+				struct copydata newcopydata = { .src = nsrcf, .dest = ndestf, .verbose = copydata->verbose, .recurse = 1 };
+				copy(&newcopydata);
 			}
 		}
 	} else if (filetype == S_IFIFO) {
-		if (verbose) printf("Creating FIFO: %s\n", dest);
-		if (mkfifo(dest, stat->st_mode) != 0) {
-			eprintf("mkfifo: %s: %s\n", dest, strerr);
+		if (copydata->verbose) printf("Creating FIFO: %s\n", copydata->dest);
+		if (mkfifo(copydata->dest, stat->st_mode) != 0) {
+			eprintf("mkfifo: %s: %s\n", copydata->dest, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
 	} else if (filetype == S_IFLNK) {
-		if (verbose) printf("Creating symlink: %s\n", dest);
+		if (copydata->verbose) printf("Creating symlink: %s\n", copydata->dest);
 		char *symdata = malloc(PATH_MAX);
 		if (!symdata) {
 			eprintf("malloc: %s\n", strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
-		ssize_t len = readlink(src, symdata, PATH_MAX-1);
+		ssize_t len = readlink(copydata->src, symdata, PATH_MAX-1);
 		if (len < 0 || len >= PATH_MAX-2) {
 			if (len < 0) {
-				eprintf("readlink: %s: %s\n", src, strerr);
+				eprintf("readlink: %s: %s\n", copydata->src, strerr);
 			} else {
-				eprintf("data of symlink %s is too big\n", src);
+				eprintf("data of symlink %s is too big\n", copydata->src);
 			}
 			free(symdata); free(stat); if (dstat) free(dstat);
 			return 1;
 		}
 		symdata[len] = 0;
-		if (symlink(symdata, dest) != 0) {
-			eprintf("symlink: %s: %s\n", dest, strerr);
+		if (symlink(symdata, copydata->dest) != 0) {
+			eprintf("symlink: %s: %s\n", copydata->dest, strerr);
 			free(symdata); free(stat); if (dstat) free(dstat);
 			return 1;
 		}
 		free(symdata);
 	} else if (filetype == S_IFSOCK) {
-		eprintf("Don't know how to copy socket %s to %s\n", src, dest);
+		eprintf("Don't know how to copy socket %s to %s\n", copydata->src, copydata->dest);
 	} else if (filetype == S_IFCHR || filetype == S_IFBLK) {
-		if (verbose) printf("Creating %sdevice: %s\n", filetype == S_IFBLK ? "block " : filetype == S_IFCHR ? "character " : "", dest);
-		if (mknod(dest, stat->st_mode, stat->st_dev) != 0) {
-			eprintf("mknod: %s: %s\n", dest, strerr);
+		if (copydata->verbose) printf("Creating %sdevice: %s\n", filetype == S_IFBLK ? "block " : filetype == S_IFCHR ? "character " : "", copydata->dest);
+		if (mknod(copydata->dest, stat->st_mode, stat->st_dev) != 0) {
+			eprintf("mknod: %s: %s\n", copydata->dest, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
 	} else if (filetype == S_IFREG) {
-		FILE *f_src = fopen(src, "rb");
+		FILE *f_src = fopen(copydata->src, "rb");
 		if (!f_src) {
-			eprintf("fopen: %s: %s\n", src, strerr);
+			eprintf("fopen: %s: %s\n", copydata->src, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
-		FILE *f_dest = fopen(dest, "wb");
+		FILE *f_dest = fopen(copydata->dest, "wb");
 		if (!f_dest) {
 			fclose(f_src);
-			eprintf("fopen: %s: %s\n", dest, strerr);
+			eprintf("fopen: %s: %s\n", copydata->dest, strerr);
 			free(stat); if (dstat) free(dstat);
 			return 1;
 		}
-		res = copydata(f_src, f_dest, BLOCK);
+		res = copyfiledata(f_src, f_dest, BLOCK);
 		fclose(f_src);
 		fclose(f_dest);
 	}
 	/*
 	if (fchmod(fileno(f_dest), stat->st_mode) != 0) {
-		eprintf("fchmod: %s: %s\n", dest, strerr);
+		eprintf("fchmod: %s: %s\n", copydata->dest, strerr);
 		free(stat); if (dstat) free(dstat);
 		return 1;
 	}
@@ -203,7 +197,7 @@ int usage(char *argv0) {
 Usage: %s [src] [dest]\n\
 	-v --verbose   : extra information\n\
 	-r --recursive : recurse down directories\n\
-	-f --fork      : fork() when recursing\n", argv0);
+	-t --threads   : use threads when recursing\n", argv0);
 	return 2;
 }
 int main(int argc, char *argv[]) {
@@ -211,7 +205,7 @@ int main(int argc, char *argv[]) {
 	bool flag_done = 0;
 	bool verbose = 0;
 	bool recursive = 0;
-	bool fork_recursive = 0;
+	bool threads = 0;
 	char *src = NULL;
 	char *dest = NULL;
 	for (int i = 1; i < argc; ++i) {
@@ -224,10 +218,6 @@ int main(int argc, char *argv[]) {
 			if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "--recursive") == 0) {
 				if (recursive) INVALID;
 				recursive = 1;
-			} else
-			if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--fork") == 0) {
-				if (fork_recursive) INVALID;
-				fork_recursive = 1;
 			} else
 			INVALID;
 		} else {
@@ -242,8 +232,8 @@ int main(int argc, char *argv[]) {
 			}
 		}
 	}
-	if (fork_recursive && !recursive) INVALID;
+	if (threads && !recursive) INVALID;
 	if (!src || !dest || !src[0] || !dest[0]) INVALID;
-	int r = copy(src, dest, verbose, recursive, fork_recursive);
-	return r;
+	struct copydata copydata = { .src = src, .dest = dest, .verbose = verbose, .recurse = recursive };
+	return copy(&copydata);
 }
